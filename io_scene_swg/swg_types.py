@@ -21,7 +21,7 @@
 # SOFTWARE.
 from audioop import cross
 from enum import IntEnum
-import math
+import math, struct
 from re import I
 from sys import maxsize
 from xml.dom import minidom
@@ -319,45 +319,40 @@ class PathGraph(object):
 		iff.insertChunk("META")
 		iff.insert_int32(3)
 		iff.exitChunk("META")
-		
+
 		iff.insertChunk("PNOD")
 		iff.insert_int32(len(self.nodes))
+		node_buf = bytearray()
 		for node in self.nodes:
-			iff.insert_int32(node.index)
-			iff.insert_int32(node.id)
-			iff.insert_int32(node.key)			
-			iff.insert_int32(node.type)
-			iff.insertFloatVector3(node.position)
-			iff.insertFloat(node.radius)
+			p = node.position
+			# i=index, i=id, i=key, i=type, fff=position, f=radius
+			node_buf += struct.pack('<iiiifff f', node.index, node.id, node.key, node.type, p[0], p[1], p[2], node.radius)
+		iff.insertChunkData(node_buf)
 		iff.exitChunk("PNOD")
-		
+
 		iff.insertChunk("PEDG")
 		iff.insert_int32(len(self.edges))
+		edge_buf = bytearray()
 		for edge in self.edges:
-			iff.insert_int32(edge.indexA)
-			iff.insert_int32(edge.indexB)
-			iff.insertFloat(edge.widthRight)
-			iff.insertFloat(edge.widthLeft)
+			edge_buf += struct.pack('<iiff', edge.indexA, edge.indexB, edge.widthRight, edge.widthLeft)
+		iff.insertChunkData(edge_buf)
 		iff.exitChunk("PEDG")
 
 		edgeCounts = [0]*len(self.nodes)
 		edgeStarts = [-1]*len(self.nodes)
 		for i, edge in enumerate(self.edges):
 			edgeCounts[edge.indexA] += 1
-
 			if edgeStarts[edge.indexA] == -1:
 				edgeStarts[edge.indexA] = i
 
 		iff.insertChunk("ECNT")
 		iff.insert_int32(len(edgeCounts))
-		for ec in edgeCounts:
-			iff.insert_int32(ec)
+		iff.insertChunkData(struct.pack(f'<{len(edgeCounts)}i', *edgeCounts))
 		iff.exitChunk("ECNT")
 
 		iff.insertChunk("ESTR")
 		iff.insert_int32(len(edgeStarts))
-		for es in edgeStarts:
-			iff.insert_int32(es)
+		iff.insertChunkData(struct.pack(f'<{len(edgeStarts)}i', *edgeStarts))
 		iff.exitChunk("ESTR")
 
 		iff.exitForm("0001")
@@ -430,7 +425,6 @@ class PobFile(object):
 
 		iff.insertForm("CELS")
 		for cell_id, cell in enumerate(self.cells):
-			print(f"Writing out cell {cell.appearance_file}..")
 			iff.insertForm("CELL")
 			iff.insertForm("0005")
 			iff.insertChunk("DATA")
@@ -448,66 +442,36 @@ class PobFile(object):
 			for portal in cell.portals:
 				iff.insertForm("PRTL")
 				iff.insertChunk("0005")
-				if cell_id > 0:
-					iff.insert_bool(False)
-				else: # Hacky way to do this but only ships seem to set r0 portals to disabled
-					iff.insert_bool(self.ship)
-				iff.insert_bool(portal.passable)
-				iff.insert_int32(portal.id)
-				
-				iff.insert_bool(portal.clockwise)
-				iff.insert_int32(portal.connecting_cell)
-
+				# Hacky way to do this but only ships seem to set r0 portals to disabled
+				disabled = self.ship if cell_id == 0 else False
 				hasHp = portal.doorstyle != None
-				iff.insertChunkString(portal.doorstyle if hasHp else "")
-				iff.insert_bool(hasHp)
 				hpnt = portal.doorhardpoint if hasHp else [1,0,0,0, 0,1,0,0, 0,0,1,0]
-				iff.insertFloat(hpnt[0])
-				iff.insertFloat(hpnt[1])
-				iff.insertFloat(hpnt[2])
-				iff.insertFloat(hpnt[3])
-				iff.insertFloat(hpnt[4])
-				iff.insertFloat(hpnt[5])
-				iff.insertFloat(hpnt[6])
-				iff.insertFloat(hpnt[7])
-				iff.insertFloat(hpnt[8])
-				iff.insertFloat(hpnt[9])
-				iff.insertFloat(hpnt[10])
-				iff.insertFloat(hpnt[11])
-
+				door_str = (portal.doorstyle if hasHp else "").encode('ASCII') + b'\x00'
+				# ?=disabled, ?=passable, i=portal_id, ?=clockwise, i=connecting_cell
+				buf = struct.pack('<??i?i', disabled, portal.passable, portal.id, portal.clockwise, portal.connecting_cell)
+				buf += door_str
+				# ?=hasDoorHardpoint, 12f=3x4 transform matrix
+				buf += struct.pack('<?12f', hasHp, *hpnt)
+				iff.insertChunkData(buf)
 				iff.exitChunk("0005")
 				iff.exitForm("PRTL")
 
 			iff.insertChunk("LGHT")
 			iff.insert_int32(len(cell.lights))
+			lght_buf = bytearray()
 			for light in cell.lights:
-				iff.insert_int8(light.lightType)
-				iff.insertFloat(light.intensity)
-				iff.insertFloat(light.diffuse_color[0] * light.intensity)
-				iff.insertFloat(light.diffuse_color[1] * light.intensity)
-				iff.insertFloat(light.diffuse_color[2] * light.intensity)
-				
-				iff.insertFloat(light.intensity)
-				iff.insertFloat(light.specular_color[0] * light.intensity)
-				iff.insertFloat(light.specular_color[1] * light.intensity)
-				iff.insertFloat(light.specular_color[2] * light.intensity)
-				iff.insertFloat(light.transform[0])
-				iff.insertFloat(light.transform[1])
-				iff.insertFloat(light.transform[2])
-				iff.insertFloat(light.transform[3])
-				iff.insertFloat(light.transform[4])
-				iff.insertFloat(light.transform[5])
-				iff.insertFloat(light.transform[6])
-				iff.insertFloat(light.transform[7])
-				iff.insertFloat(light.transform[8])
-				iff.insertFloat(light.transform[9])
-				iff.insertFloat(light.transform[10])
-				iff.insertFloat(light.transform[11])
-
-				iff.insertFloat(light.constant_att)
-				iff.insertFloat(light.linear_att)
-				iff.insertFloat(light.quad_att)
-
+				t = light.transform
+				inten = light.intensity
+				# b=type, f=diffuseIntensity, 3f=diffuseRGB, f=specularIntensity, 3f=specularRGB, 12f=3x4 transform, 3f=attenuation(const/linear/quad)
+				lght_buf += struct.pack('<b23f',
+						light.lightType,
+						inten,
+						light.diffuse_color[0] * inten, light.diffuse_color[1] * inten, light.diffuse_color[2] * inten,
+						inten,
+						light.specular_color[0] * inten, light.specular_color[1] * inten, light.specular_color[2] * inten,
+						t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11],
+						light.constant_att, light.linear_att, light.quad_att)
+			iff.insertChunkData(lght_buf)
 			iff.exitChunk("LGHT")
 
 			iff.exitForm("0005")
@@ -972,14 +936,18 @@ class IndexedTriangleList(object):
 		iff.insertForm("IDTL")
 		iff.insertForm("0000")
 
-		iff.insertChunk("VERT")
+		vert_buf = bytearray()
 		for v in self.verts:
-			iff.insertFloatVector3(v)
+			vert_buf += struct.pack('fff', v[0], v[1], v[2])
+		iff.insertChunk("VERT")
+		iff.insertChunkData(vert_buf)
 		iff.exitChunk("VERT")
 
-		iff.insertChunk("INDX")
+		idx_buf = bytearray()
 		for i in self.indexes:
-			iff.insertInt32Vector3(i)
+			idx_buf += struct.pack('<iii', i[0], i[1], i[2])
+		iff.insertChunk("INDX")
+		iff.insertChunkData(idx_buf)
 		iff.exitChunk("INDX")
 
 		iff.exitForm("0000")
@@ -2194,7 +2162,11 @@ class SWGMesh(object):
 		return True
 			
 	def write(self, filename):
-		iff = nsg_iff.IFF(initial_size=512000)
+		# Estimate buffer size: ~32 bytes per vert (pos+norm+uv) + 6 per tri + overhead
+		estimated = 4096
+		for sps in self.spss:
+			estimated += len(sps.verts) * 36 + len(sps.tris) * 6 + 256
+		iff = nsg_iff.IFF(initial_size=max(estimated, 4096))
 		# - BEGIN MESH		
 		iff.insertForm("MESH")
 		iff.insertForm("0005")
@@ -2273,40 +2245,51 @@ class SWGMesh(object):
 			#iff.insert_uint32(4357)
 			#iff.insert_uint32(53765)
 			iff.insert_uint32(sps.flags)
-			self.debug_flags(sps.flags, i)
 			iff.insert_uint32(len(sps.verts))
 			iff.exitChunk("INFO")
 			iff.insertChunk("DATA")
+			has_transformed = vertex_buffer_format.isTransformed(sps.flags)
+			has_point_size = vertex_buffer_format.hasPointSize(sps.flags)
+			has_color0 = vertex_buffer_format.hasColor0(sps.flags)
+			has_color1 = vertex_buffer_format.hasColor1(sps.flags)
+			buf = bytearray()
 			for v in sps.verts:
-				iff.insertFloatVector3((v.pos.x, v.pos.y, v.pos.z))
-
-				if vertex_buffer_format.isTransformed(sps.flags):
-					iff.insertFloat(1)
-				
-				iff.insertFloatVector3((v.normal.x, v.normal.y, v.normal.z))
-				
-				if vertex_buffer_format.hasPointSize(sps.flags):
-					iff.insertFloat(1)
-
-				if vertex_buffer_format.hasColor0(sps.flags):
-					iff.insert_color(v.color0)
-
-				if vertex_buffer_format.hasColor1(sps.flags):
-					iff.insert_color(v.color1)
-				
+				buf += struct.pack('fff', v.pos[0], v.pos[1], v.pos[2])
+				if has_transformed:
+					buf += struct.pack('f', 1.0)
+				buf += struct.pack('fff', v.normal[0], v.normal[1], v.normal[2])
+				if has_point_size:
+					buf += struct.pack('f', 1.0)
+				if has_color0:
+					c = v.color0
+					buf += bytes((
+						max(0, min(255, int(c[2] * 255))),
+						max(0, min(255, int(c[1] * 255))),
+						max(0, min(255, int(c[0] * 255))),
+						max(0, min(255, int(c[3] * 255))),
+					))
+				if has_color1:
+					c = v.color1
+					buf += bytes((
+						max(0, min(255, int(c[2] * 255))),
+						max(0, min(255, int(c[1] * 255))),
+						max(0, min(255, int(c[0] * 255))),
+						max(0, min(255, int(c[3] * 255))),
+					))
 				for uv_set in v.texs:
 					for value in uv_set:
-						iff.insertFloat(value)
+						buf += struct.pack('f', value)
+			iff.insertChunkData(buf)
 			iff.exitChunk("DATA")
 			iff.exitForm("0003")
 			iff.exitForm("VTXA")
 
 			iff.insertChunk("INDX")
-			iff.insert_uint32(len(sps.tris)*3)
+			iff.insert_uint32(len(sps.tris) * 3)
+			idx_buf = bytearray()
 			for t in sps.tris:
-				iff.insert_uint16(t.p1)
-				iff.insert_uint16(t.p2)
-				iff.insert_uint16(t.p3)
+				idx_buf += struct.pack('<HHH', t.p1, t.p2, t.p3)
+			iff.insertChunkData(idx_buf)
 			iff.exitChunk("INDX")
 
 			iff.exitForm("0001")
