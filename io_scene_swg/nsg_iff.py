@@ -182,6 +182,11 @@ class IFF():
 		self.stack[self.stack_depth] = s
 		return readData
 
+	def read_remaining(self):
+		"""Return the unread bytes of the current chunk and mark them as consumed."""
+		s = self.stack[self.stack_depth]
+		return self.read_misc(s.length - s.used)
+
 	def read_bool8(self):
 		return self.read_uint8() != 0
 
@@ -421,13 +426,6 @@ class IFF():
 	def insert_uint32(self, i):
 		self.insertChunkData(int.to_bytes(i, 4, byteorder="little", signed=False))
 	
-	def insert_color(self, color):
-		r = max(0, min(255, int(color[0] * 255)))
-		g = max(0, min(255, int(color[1] * 255)))
-		b = max(0, min(255, int(color[2] * 255)))
-		a = max(0, min(255, int(color[3] * 255)))
-		self.insertChunkData(bytes((b, g, r, a)))
-
 	def insertIff(self, iff):
 		#make sure the data array can handle this addition
 		newLength=iff.stack[0].length

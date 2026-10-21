@@ -22,6 +22,8 @@
 from audioop import cross
 from enum import IntEnum
 import math, struct
+import os
+import numpy as np
 from re import I
 from sys import maxsize
 from xml.dom import minidom
@@ -1031,7 +1033,7 @@ class BoxTree:
 		if self.root is None:
 			return
 		# Assign pre-order indices and flatten to list
-		flat: list[BoxTreeNode] = []
+		flat = []
 		self._flatten(self.root, flat)
 
 		iff.insertForm("BTRE")
@@ -1816,22 +1818,20 @@ class SWGShader(object):
 				iff.exitChunk("NAME")
 
 class SPS(object):
-	__slots__ = ('no', 'shader', 'flags', 'verts', 'tris', 'full_shader_path', 'real_shader')
-	def __init__(self):
-		self.no = 0
-		self.shader = ""
-		self.flags = 0
-		self.verts = []
-		self.tris = []
-		self.full_shader_path = None
-		self.real_shader = None
+	"""One shader primitive set of a mesh.
 
-	def __init__(self, no , shader, flags, verts, tris):
+	vertex_data: structured array, dtype vertex_buffer_format.vertex_dtype(flags), laid out like the VTXA DATA chunk.
+	             Read from a file it is a read-only view of the file bytes, so copy it before editing in place.
+	indices:     int32 (T, 3), rows are (p1, p2, p3) as written to INDX
+	"""
+	__slots__ = ('no', 'shader', 'flags', 'vertex_data', 'indices', 'full_shader_path', 'real_shader')
+
+	def __init__(self, no, shader, flags, vertex_data, indices):
 		self.no = no
 		self.shader = shader
 		self.flags = flags
-		self.verts = verts
-		self.tris = tris
+		self.vertex_data = vertex_data
+		self.indices = indices
 		self.full_shader_path = None
 		self.real_shader = None
 
@@ -1861,10 +1861,23 @@ class SPS(object):
 			return self.shader.split('/')[1].split('.')[0]
 
 	def __str__(self):
-		return f"SPS_No: {self.no} Shader: {self.shader} Flags: {self.flags} Verts: {len(self.verts)} Tris: {len(self.tris)}"
+		return f"SPS_No: {self.no} Shader: {self.shader} Flags: {self.flags} Verts: {len(self.vertex_data)} Tris: {len(self.indices)}"
 
 	def __repr__(self):
 		return self.__str__()
+
+_shader_cache = {}   # shader path -> (mtime, SWGShader)
+
+def load_shader_cached(path, root):
+	try:
+		stamp = os.path.getmtime(path)
+	except OSError:
+		stamp = None
+	entry = _shader_cache.get(path)
+	if entry is None or entry[0] != stamp:
+		entry = (stamp, SWGShader(path, root))
+		_shader_cache[path] = entry
+	return entry[1]
 
 class SWGMesh(object):
 	__slots__ = ('filename', 'spss', 'extents', 'collision', 'realCollision', 'hardpoints', 'floor', 'root_dir')
@@ -1920,59 +1933,25 @@ class SWGMesh(object):
 			print(f'Mesh: {self.filename} SPS: {sps_no} Flags: {flags}: Has Color1. Never seen that before! Not doing anything with it FYI')
 
 
-	def read_vertex(self, flags, iff):
-		v = SWGVertex()
+	def _read_vertex_data(self, iff, sps_no, flags, num_verts):
+		"""Rest of the current DATA chunk as a structured array of num_verts vertices (see vertex_buffer_format.vertex_dtype),
+		or None if the chunk is too short."""
+		layout = vertex_buffer_format.vertex_dtype(flags)
+		raw = iff.read_remaining()
+		if len(raw) < num_verts * layout.itemsize:
+			print(f"Error: {self.filename} SPS {sps_no}: DATA has {len(raw)} bytes but {num_verts} verts x {layout.itemsize} bytes are needed (flags {flags})")
+			return None
+		return np.frombuffer(raw, dtype=layout, count=num_verts)
 
-		num_uv_sets = vertex_buffer_format.getNumberOfTextureCoordinateSets(flags)
-		skip_dot3 = False
-		if(num_uv_sets > 0) and (vertex_buffer_format.getTextureCoordinateSetDimension(flags, num_uv_sets - 1) == 4):
-			skip_dot3 = True
-			num_uv_sets -= 1
-
-		v.texs = []
-
-		if vertex_buffer_format.hasPosition(flags):
-			v.pos =  Vector(iff.read_vector3())
-
-		if vertex_buffer_format.hasNormal(flags):
-			v.normal =  Vector(iff.read_vector3())
-
-		if vertex_buffer_format.hasPointSize(flags):
-			point_size = iff.read_float() # unused
-
-		if vertex_buffer_format.hasColor0(flags):
-			# NSG Seems like this should be ARGB per SOE code, but that makes 
-			# the Anchorhead Cantina look gross. Used trial and error to determine
-			# order: BGRA
-			b = iff.read_color()
-			g = iff.read_color()
-			r = iff.read_color()
-			a = iff.read_color()
-			v.color0 = [r,g,b,a]
-
-		if vertex_buffer_format.hasColor1(flags):
-			# NSG Seems like this should be ARGB per SOE code, but that makes 
-			# the Anchorhead Cantina look gross. Used trial and error to determine
-			# order: BGRA
-			b = iff.read_color()
-			g = iff.read_color()
-			r = iff.read_color()
-			a = iff.read_color()
-			v.color1 = [r,g,b,a]
-
-		for i in range(0, num_uv_sets):
-			dim = vertex_buffer_format.getTextureCoordinateSetDimension(flags, i)
-			v.texs.append([]) 
-			for j in range(0, dim):
-				v.texs[i].append(iff.read_float())
-
-		if skip_dot3:
-			iff.read_float()
-			iff.read_float()
-			iff.read_float()
-			iff.read_float()
-
-		return v
+	@staticmethod
+	def _read_triangle_indices(iff, version):
+		"""Rest of the current INDX chunk as int32 (T, 3). The index width follows the SPS version, as in
+		ShaderPrimitiveSetTemplate: 0000 is int32, 0001 is uint16."""
+		index_count = iff.read_uint32()
+		index_dtype = '<u2' if version == "0001" else '<i4'
+		tri_count = index_count // 3
+		flat = np.frombuffer(iff.read_remaining(), dtype=index_dtype, count=tri_count * 3)
+		return flat.astype(np.int32).reshape(tri_count, 3)
 
 	def update_vertex(self, flags, iff, dx, dy, dz):
 		v = SWGVertex()
@@ -2118,46 +2097,30 @@ class SWGMesh(object):
 
 				iff.enterChunk("INFO")
 				bit_flag = iff.read_int32()
-				#self.debug_flags(bit_flag, sps_no)
 				num_verts = iff.read_uint32()
-				verts = [None] * num_verts
 				iff.exitChunk("INFO")
 
 				iff.enterChunk("DATA")
-				for i in range(0, num_verts):
-					verts[i] = self.read_vertex(bit_flag, iff)
-
+				vertex_data = self._read_vertex_data(iff, sps_no, bit_flag, num_verts)
+				if vertex_data is None:
+					return False
 				iff.exitChunk("DATA")
 				iff.exitForm("0003")
 
 				iff.exitForm("VTXA")
 
 				iff.enterChunk("INDX")
-				indexes = []
-				index_count = iff.read_uint32()
-				for i in range(index_count//3):
-					tri = Triangle()
-					if version == "0001":
-						tri.p1 = iff.read_uint16()
-						tri.p2 = iff.read_uint16()
-						tri.p3 = iff.read_uint16()
-					else:
-						tri.p1 = iff.read_int32()
-						tri.p2 = iff.read_int32()
-						tri.p3 = iff.read_int32()
-					indexes.append(tri)
-				#print(f'Read Index Count: {index_count}')
-
+				indices = self._read_triangle_indices(iff, version)
 				iff.exitChunk("INDX")
 				iff.exitForm(version)
-				print(f"SPS {sps_no} Shader: {sht} Version: {version} Verts: {len(verts)} Tris: {len(indexes)}")
+				print(f"SPS {sps_no} Shader: {sht} Version: {version} Verts: {num_verts} Tris: {len(indices)}")
 
-				sps = SPS(sps_no, sht, bit_flag, verts, indexes)
+				sps = SPS(sps_no, sht, bit_flag, vertex_data, indices)
 
 				real_shader_path = support.find_file(sps.shader, SWG_ROOT)
 				if real_shader_path:
 					sps.full_shader_path = real_shader_path
-					sps.real_shader = SWGShader(sps.full_shader_path, SWG_ROOT)
+					sps.real_shader = load_shader_cached(sps.full_shader_path, SWG_ROOT)
 				else:
 					print(f"Couldn't locate real shader path for: {sps.shader}")
 				self.spss.append(sps)
@@ -2170,10 +2133,10 @@ class SWGMesh(object):
 		return True
 			
 	def write(self, filename):
-		# Estimate buffer size: ~32 bytes per vert (pos+norm+uv) + 6 per tri + overhead
+		# Buffer size: vertex and 16-bit index bytes of every SPS plus chunk overhead
 		estimated = 4096
 		for sps in self.spss:
-			estimated += len(sps.verts) * 36 + len(sps.tris) * 6 + 256
+			estimated += sps.vertex_data.nbytes + sps.indices.size * 2 + 256
 		iff = nsg_iff.IFF(initial_size=max(estimated, 4096))
 		# - BEGIN MESH		
 		iff.insertForm("MESH")
@@ -2252,52 +2215,21 @@ class SWGMesh(object):
 			iff.insertChunk("INFO")
 			#iff.insert_uint32(4357)
 			#iff.insert_uint32(53765)
+			vertex_data, indices = sps.vertex_data, sps.indices
+			if indices.size and indices.max() > 65535:
+				raise ValueError(f"{self.filename}: SPS {i} has {len(vertex_data)} verts but INDX uses 16-bit indices (max 65536)")
 			iff.insert_uint32(sps.flags)
-			iff.insert_uint32(len(sps.verts))
+			iff.insert_uint32(len(vertex_data))
 			iff.exitChunk("INFO")
 			iff.insertChunk("DATA")
-			has_transformed = vertex_buffer_format.isTransformed(sps.flags)
-			has_point_size = vertex_buffer_format.hasPointSize(sps.flags)
-			has_color0 = vertex_buffer_format.hasColor0(sps.flags)
-			has_color1 = vertex_buffer_format.hasColor1(sps.flags)
-			buf = bytearray()
-			for v in sps.verts:
-				buf += struct.pack('fff', v.pos[0], v.pos[1], v.pos[2])
-				if has_transformed:
-					buf += struct.pack('f', 1.0)
-				buf += struct.pack('fff', v.normal[0], v.normal[1], v.normal[2])
-				if has_point_size:
-					buf += struct.pack('f', 1.0)
-				if has_color0:
-					c = v.color0
-					buf += bytes((
-						max(0, min(255, int(c[2] * 255))),
-						max(0, min(255, int(c[1] * 255))),
-						max(0, min(255, int(c[0] * 255))),
-						max(0, min(255, int(c[3] * 255))),
-					))
-				if has_color1:
-					c = v.color1
-					buf += bytes((
-						max(0, min(255, int(c[2] * 255))),
-						max(0, min(255, int(c[1] * 255))),
-						max(0, min(255, int(c[0] * 255))),
-						max(0, min(255, int(c[3] * 255))),
-					))
-				for uv_set in v.texs:
-					for value in uv_set:
-						buf += struct.pack('f', value)
-			iff.insertChunkData(buf)
+			iff.insertChunkData(vertex_data.tobytes())
 			iff.exitChunk("DATA")
 			iff.exitForm("0003")
 			iff.exitForm("VTXA")
 
 			iff.insertChunk("INDX")
-			iff.insert_uint32(len(sps.tris) * 3)
-			idx_buf = bytearray()
-			for t in sps.tris:
-				idx_buf += struct.pack('<HHH', t.p1, t.p2, t.p3)
-			iff.insertChunkData(idx_buf)
+			iff.insert_uint32(indices.size)
+			iff.insertChunkData(indices.astype('<u2').tobytes())   # 16-bit indices, three per triangle
 			iff.exitChunk("INDX")
 
 			iff.exitForm("0001")

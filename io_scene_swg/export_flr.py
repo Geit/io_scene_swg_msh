@@ -24,6 +24,7 @@ import os
 import time
 import math
 import mathutils
+import numpy as np
 from .swg_types import FloorEdgeType, FloorFile, FloorTri, PathGraph, PathGraphNode, PathNodeType
 from .support import convert_vector3, getChildren
 from mathutils import Vector
@@ -253,6 +254,46 @@ def _match_segment_to_poly(a, b, poly_verts):
 
     return False
 
+# Largest distance any test in _match_segment_to_poly accepts (Test 1: 10cm off the plane)
+PORTAL_MATCH_MAX_DIST = 0.1
+PORTAL_BOX_EPSILON = 1e-5   # float slack
+
+
+def _collect_portal_polygons(portal_objects):
+    """One entry per portal polygon: (portal index, portal object, portal id, polygon index, corners)."""
+    polys = []
+    for portalIndex, (portalObj, pid) in enumerate(portal_objects):
+        if portalObj.type != 'MESH':
+            continue
+        portalMesh = portalObj.to_mesh()
+        for portalTri in portalMesh.polygons:
+            corners = [Vector(portalMesh.vertices[p].co) for p in portalTri.vertices]
+            polys.append((portalIndex, portalObj, pid, portalTri.index, corners))
+    return polys
+
+
+def _portal_bounding_boxes(portal_polys, padding):
+    """Per-polygon min and max corner tables, grown by `padding`."""
+    box_min = np.empty((len(portal_polys), 3))
+    box_max = np.empty((len(portal_polys), 3))
+    for row, (_, _, _, _, corners) in enumerate(portal_polys):
+        xs = [c.x for c in corners]
+        ys = [c.y for c in corners]
+        zs = [c.z for c in corners]
+        box_min[row] = (min(xs) - padding, min(ys) - padding, min(zs) - padding)
+        box_max[row] = (max(xs) + padding, max(ys) + padding, max(zs) + padding)
+    return box_min, box_max
+
+
+def _candidate_portal_polygons(edgeA, edgeB, box_min, box_max):
+    """Rows of the polygons whose padded box contains both ends of the edge."""
+    a = np.array((edgeA.x, edgeA.y, edgeA.z))
+    b = np.array((edgeB.x, edgeB.y, edgeB.z))
+    a_in_box = (a >= box_min) & (a <= box_max)   # per polygon, per axis
+    b_in_box = (b >= box_min) & (b <= box_max)
+    return np.nonzero((a_in_box & b_in_box).all(axis=1))[0]   # both ends inside on every axis
+
+
 def create_floor_triangles_from_mesh(obj, me, portal_objects):
     tris = []
     edge_types = {}
@@ -275,12 +316,10 @@ def create_floor_triangles_from_mesh(obj, me, portal_objects):
             edge_key = frozenset((verts[i], verts[(i + 1) % n]))
             edge_adj.setdefault(edge_key, []).append(poly.index)
 
-    # Cache portal meshes to avoid repeated to_mesh() calls
-    portal_cache = []
-    for portalIndex, (portalObj, pid) in enumerate(portal_objects):
-        if portalObj.type != 'MESH':
-            continue
-        portal_cache.append((portalIndex, portalObj, pid, portalObj.to_mesh()))
+    # Padded bounding boxes let the 3-test match below skip polygons an edge cannot touch.
+    portal_polys = _collect_portal_polygons(portal_objects)
+    if portal_polys:
+        box_min, box_max = _portal_bounding_boxes(portal_polys, PORTAL_MATCH_MAX_DIST + PORTAL_BOX_EPSILON)
 
     usedPortals = set()
     for t1 in me.polygons:
@@ -323,21 +362,15 @@ def create_floor_triangles_from_mesh(obj, me, portal_objects):
         ]
 
         for edgeA, edgeB, neighborIdx, portalIdAttr in edges_and_neighbors:
-            if neighborIdx != -1:
+            if neighborIdx != -1 or not portal_polys:
                 continue
 
-            matched = False
-            for portalIndex, portalObj, pid, portalMesh in portal_cache:
-                for portalTri in portalMesh.polygons:
-                    portalVerts = [Vector(portalMesh.vertices[p].co) for p in portalTri.vertices]
-
-                    if _match_segment_to_poly(edgeA, edgeB, portalVerts):
-                        print(f"   Intersection found: floorTri {t1.index}, Edge: {edgeA} - {edgeB} portalMesh {portalObj.name}: tri {portalTri.index} {portalIdAttr} = {pid}")
-                        setattr(ft, portalIdAttr, portalIndex)
-                        usedPortals.add(portalObj)
-                        matched = True
-                        break
-                if matched:
+            for ci in _candidate_portal_polygons(edgeA, edgeB, box_min, box_max):
+                portalIndex, portalObj, pid, triIndex, portalVerts = portal_polys[ci]
+                if _match_segment_to_poly(edgeA, edgeB, portalVerts):
+                    print(f"   Intersection found: floorTri {t1.index}, Edge: {edgeA} - {edgeB} portalMesh {portalObj.name}: tri {triIndex} {portalIdAttr} = {pid}")
+                    setattr(ft, portalIdAttr, portalIndex)
+                    usedPortals.add(portalObj)
                     break
 
         tris.append(ft)    

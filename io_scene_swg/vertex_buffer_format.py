@@ -20,6 +20,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import numpy as np
+
 TextureCoordinateSetCountShift = 8
 TextureCoordinateSetCountMask = 15
 
@@ -169,3 +171,48 @@ def setTextureCoordinateSetDimension(flags, textureCoordinateSet, dimension):
     shift = (TextureCoordinateSetDimensionBaseShift + (textureCoordinateSet * TextureCoordinateSetDimensionPerSetShift))
     flags = (flags & ~((TextureCoordinateSetDimensionMask) << shift)) | ((dimension - TextureCoordinateSetDimensionAdjustment) << shift)
     return flags
+
+# Vertex layout as a numpy structured dtype in file byte order: position, [w if transformed], normal,
+# [point size], [color0], [color1], uv sets. Colours are 4 bytes B, G, R, A.
+_dtype_cache = {}
+
+def vertex_dtype(flags):
+    """numpy structured dtype describing one vertex for the given flags."""
+    dt = _dtype_cache.get(flags)
+    if dt is not None:
+        return dt
+    fields = []
+    if hasPosition(flags):
+        fields.append(('pos', '<f4', (3,)))
+    if isTransformed(flags):
+        fields.append(('w', '<f4'))
+    if hasNormal(flags):
+        fields.append(('normal', '<f4', (3,)))
+    if hasPointSize(flags):
+        fields.append(('psize', '<f4'))
+    if hasColor0(flags):
+        fields.append(('color0', 'u1', (4,)))
+    if hasColor1(flags):
+        fields.append(('color1', 'u1', (4,)))
+    for i in range(getNumberOfTextureCoordinateSets(flags)):
+        fields.append((f'uv{i}', '<f4', (getTextureCoordinateSetDimension(flags, i),)))
+    dt = np.dtype(fields)
+    _dtype_cache[flags] = dt
+    return dt
+
+def vertex_stride(flags):
+    """Bytes per vertex for the given flags."""
+    return vertex_dtype(flags).itemsize
+
+# Column order swapping red and blue: RGBA <-> BGRA, its own inverse
+_SWAP_RED_BLUE = [2, 1, 0, 3]
+
+def rgba_to_color_bytes(rgba):
+    """(N, 4) RGBA floats in 0..1 -> (N, 4) uint8 in file order B, G, R, A, truncating like int(x * 255)."""
+    scaled = np.trunc(np.asarray(rgba, dtype=np.float64) * 255.0)
+    as_bytes = np.clip(scaled, 0, 255).astype(np.uint8)
+    return as_bytes[:, _SWAP_RED_BLUE]
+
+def color_bytes_to_rgba(b):
+    """Inverse of rgba_to_color_bytes: (N, 4) uint8 B,G,R,A -> (N, 4) float64 RGBA = byte / 255."""
+    return np.asarray(b)[:, _SWAP_RED_BLUE].astype(np.float64) / 255.0

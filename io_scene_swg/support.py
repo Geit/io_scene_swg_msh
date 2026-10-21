@@ -1048,6 +1048,31 @@ def mat2rpy(R):
 def convert_vector3(v):
 	return Vector([v[0], v[2], v[1]])
 
+def convert_vector3_array(a):
+	"""convert_vector3 for an (N, 3) numpy array: swaps the y and z columns. Returns a copy."""
+	return a[:, [0, 2, 1]]
+
+def _rows_as_opaque_bytes(a):
+	"""View each row of a contiguous 2-D array as one fixed-width byte string."""
+	row_bytes = a.dtype.itemsize * a.shape[1]
+	return a.view(np.dtype((np.void, row_bytes))).reshape(-1)
+
+def unique_rows(a):
+	"""Row-wise unique of a 2-D array, compared byte for byte, in order of first appearance.
+	Returns (first, inverse): a[first] are the unique rows and a[first][inverse] reproduces a.
+	Float arrays have -0.0 folded into 0.0 first so the two compare equal."""
+	a = np.ascontiguousarray(a)
+	if a.dtype.kind == 'f':
+		a = a + a.dtype.type(0)   # folds -0.0 into 0.0
+	rows = _rows_as_opaque_bytes(a)
+	# np.unique orders by bytes; reorder by first appearance and renumber inverse to match
+	_, first, inverse = np.unique(rows, return_index=True, return_inverse=True)
+	inverse = inverse.reshape(-1)
+	by_appearance = np.argsort(first, kind='stable')
+	new_number = np.empty_like(by_appearance)
+	new_number[by_appearance] = np.arange(len(by_appearance))
+	return first[by_appearance], new_number[inverse]
+
 def convert_scale(v):
 	return Vector([abs(v[0]), abs(v[2]), abs(v[1])])
 
