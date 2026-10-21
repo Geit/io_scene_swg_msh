@@ -506,19 +506,15 @@ class IFF():
 		#print("Writing data took: " + str(datetime.timedelta(seconds=(now - t))))
 
 	def calculate(self):
-		print(f'Max size: {self.MAXINT}')
-		crc=0xFFFFFFFF
-		for d in self.data:
-			ind = self.int_overflow((crc>>24) ^ d) & 0xFF
+		"""Iff::calculateCrc: Crc::calculate over the bytes written so far, as a signed int32."""
+		table = self._crc_table_u32()
+		crc = 0xFFFFFFFF
+		for d in self.data[:self.stack[0].length]:
+			crc = table[((crc >> 24) ^ d) & 0xFF] ^ ((crc << 8) & 0xFFFFFFFF)
+		crc ^= 0xFFFFFFFF
+		return crc - (1 << 32) if crc >= (1 << 31) else crc
 
-			#uind = int.from_bytes(ind.to_bytes(4, 'little', signed=True), 'little', signed=False)
-			temp = (self.crctable[ind] ^ (crc << 8))
-			crc = self.int_overflow(temp)
-			#print(f"{d}: Ind: {ind} Temp: {temp} CRC now {crc}")
-		return crc
-
-	def int_overflow(self, val):
-		if not -self.MAXINT-1 <= val <= self.MAXINT:
-			val = (val + (self.MAXINT + 1)) % (2 * (self.MAXINT + 1)) - self.MAXINT - 1
-		return val
+	def _crc_table_u32(self):
+		"""crctable with its signed entries masked to unsigned 32-bit."""
+		return [x & 0xFFFFFFFF for x in self.crctable]
 

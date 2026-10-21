@@ -480,11 +480,10 @@ class PobFile(object):
 
 		self.pathGraph.write(iff)
 
+		# computed before the chunk is inserted, as the Maya exporter does (MayaHierarchy::writePob)
+		crc = iff.calculate() if self.crc is None else self.crc
 		iff.insertChunk("CRC ")
-		if self.crc == None:
-			iff.insert_int32(iff.calculate())
-		else:
-			iff.insert_int32(self.crc)
+		iff.insert_int32(crc)
 		iff.exitChunk("CRC ")
 
 		iff.exitForm("0004")
@@ -2133,19 +2132,16 @@ class SWGMesh(object):
 
 				iff.exitForm("VTXA")
 
-				size = iff.getCurrentLength()
 				iff.enterChunk("INDX")
 				indexes = []
 				index_count = iff.read_uint32()
-				bpi = (size - 4) // index_count
-				#print(f'Size: {size} Size - 4: {size - 4}, index_count: {index_count} bpi: {bpi}')
 				for i in range(index_count//3):
 					tri = Triangle()
-					if(bpi == 2):
-						tri.p1 = iff.read_int16()
-						tri.p2 = iff.read_int16()
-						tri.p3 = iff.read_int16()
-					elif(bpi == 4):
+					if version == "0001":
+						tri.p1 = iff.read_uint16()
+						tri.p2 = iff.read_uint16()
+						tri.p3 = iff.read_uint16()
+					else:
 						tri.p1 = iff.read_int32()
 						tri.p2 = iff.read_int32()
 						tri.p3 = iff.read_int32()
