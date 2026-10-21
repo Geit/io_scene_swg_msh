@@ -955,6 +955,10 @@ class IndexedTriangleList(object):
 		
 class BoxTreeNode:
 	__slots__ = ('box_min', 'box_max', 'index', 'userId', 'childA', 'childB')
+
+	# box_max, box_min (3f each), index, userId, childA, childB (4i)
+	_FMT = struct.Struct('<6f4i')
+
 	def __init__(self, box_min, box_max, userId=-1):
 		self.box_min = list(box_min)
 		self.box_max = list(box_max)
@@ -962,6 +966,15 @@ class BoxTreeNode:
 		self.userId = userId
 		self.childA = None
 		self.childB = None
+
+	def pack(self):
+		"""NODS record; a missing child is index -1."""
+		return BoxTreeNode._FMT.pack(
+			self.box_max[0], self.box_max[1], self.box_max[2],
+			self.box_min[0], self.box_min[1], self.box_min[2],
+			self.index, self.userId,
+			self.childA.index if self.childA else -1,
+			self.childB.index if self.childB else -1)
 
 class BoxTree:
 	"""AABB tree for spatial acceleration of floor collision queries.
@@ -1019,20 +1032,17 @@ class BoxTree:
 		if self.root is None:
 			return
 		# Assign pre-order indices and flatten to list
-		flat = []
+		flat: list[BoxTreeNode] = []
 		self._flatten(self.root, flat)
 
 		iff.insertForm("BTRE")
 		iff.insertForm("0000")
 		iff.insertChunk("NODS")
 		iff.insert_int32(len(flat))
+		node_buf = bytearray()
 		for node in flat:
-			iff.insertFloatVector3(node.box_max)
-			iff.insertFloatVector3(node.box_min)
-			iff.insert_int32(node.index)
-			iff.insert_int32(node.userId)
-			iff.insert_int32(node.childA.index if node.childA else -1)
-			iff.insert_int32(node.childB.index if node.childB else -1)
+			node_buf += node.pack()
+		iff.insertChunkData(node_buf)
 		iff.exitChunk("NODS")
 		iff.exitForm("0000")
 		iff.exitForm("BTRE")
@@ -1128,30 +1138,23 @@ class FloorTri(object):
 		self.portalId2 = iff.read_int32()
 		self.portalId3 = iff.read_int32()
 
+	# corner1..3, index, nindex1..3 (7i), normal (3f), edgeType1..3 (3b), fallthrough (?), partTag, portalId1..3 (4i)
+	_FMT_0002 = struct.Struct('<7i3f3b?4i')
+
+	def pack_0002(self):
+		n = self.normal
+		return FloorTri._FMT_0002.pack(
+			self.corner1, self.corner2, self.corner3,
+			self.index,
+			self.nindex1, self.nindex2, self.nindex3,
+			n[0], n[1], n[2],
+			self.edgeType1, self.edgeType2, self.edgeType3,
+			self.fallthrough,
+			self.partTag,
+			self.portalId1, self.portalId2, self.portalId3)
+
 	def write_0002(self, iff):
-		iff.insert_int32(self.corner1)
-		iff.insert_int32(self.corner2)
-		iff.insert_int32(self.corner3)
-
-		iff.insert_int32(self.index)
-
-		iff.insert_int32(self.nindex1)
-		iff.insert_int32(self.nindex2)
-		iff.insert_int32(self.nindex3)
-
-		iff.insertFloatVector3(self.normal)
-
-		iff.insert_int8(self.edgeType1)
-		iff.insert_int8(self.edgeType2)
-		iff.insert_int8(self.edgeType3)
-
-		iff.insert_bool(self.fallthrough)
-
-		iff.insert_int32(self.partTag)
-
-		iff.insert_int32(self.portalId1)
-		iff.insert_int32(self.portalId2)
-		iff.insert_int32(self.portalId3)
+		iff.insertChunkData(self.pack_0002())
 
 class PathEdge(object):
 	__slots__ = ('tri','edge','crossable')
@@ -1160,10 +1163,13 @@ class PathEdge(object):
 		self.edge = edge
 		self.crossable = crossable
 	
+	_FMT = struct.Struct('<ii?')
+
+	def pack(self):
+		return PathEdge._FMT.pack(self.tri, self.edge, self.crossable)
+
 	def write(self, iff):
-		iff.insert_int32(self.tri)
-		iff.insert_int32(self.edge)
-		iff.insert_bool(self.crossable)
+		iff.insertChunkData(self.pack())
 
 class FloorFile(object):
 
@@ -1256,14 +1262,18 @@ class FloorFile(object):
 
 		iff.insertChunk("VERT")
 		iff.insert_int32(len(self.verts))
+		vert_buf = bytearray()
 		for v in self.verts:
-			iff.insertFloatVector3(v)
+			vert_buf += struct.pack('<fff', v[0], v[1], v[2])
+		iff.insertChunkData(vert_buf)
 		iff.exitChunk("VERT")
 
 		iff.insertChunk("TRIS")
 		iff.insert_int32(len(self.tris))
+		tri_buf = bytearray()
 		for t in self.tris:
-			t.write_0002(iff)
+			tri_buf += t.pack_0002()
+		iff.insertChunkData(tri_buf)
 		iff.exitChunk("TRIS")
 
 		# Build box tree for meshes with >= 10 triangles (matches C++ gs_minTrianglesForBoxtree)
@@ -1285,8 +1295,10 @@ class FloorFile(object):
 		if borderEdges:
 			iff.insertChunk("BEDG")
 			iff.insert_int32(len(borderEdges))
+			edge_buf = bytearray()
 			for be in borderEdges:
-				be.write(iff)
+				edge_buf += be.pack()
+			iff.insertChunkData(edge_buf)
 			iff.exitChunk("BEDG")
 
 		if self.pathGraph is not None:
